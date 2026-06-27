@@ -12,7 +12,7 @@ BOT_TOKEN = "8910395655:AAEZuuWT96CZx3lDLVQe5ey8ShEGHLo6R4o8910395655:AAEZuuWT96
 
 # آیدی کانال‌هایی که کاربر باید عضو باشه
 # مثال: REQUIRED_CHANNELS = ["@mychannel", "@mychannel2"]
-REQUIRED_CHANNELS = []
+REQUIRED_CHANNELS = ["@chaayy0"]
 
 # آیدی ادمین (اختیاری - برای اطلاع از خطاها)
 ADMIN_ID = None
@@ -21,8 +21,8 @@ ADMIN_ID = None
 
 async def check_membership(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> list:
     """لیست کانال‌هایی که کاربر عضو نیست رو برمی‌گردونه"""
-    not_joined = 
-    for channel in REQUIRED_CHANNELS: https://t.me/chaayy0
+    not_joined = []
+    for channel in REQUIRED_CHANNELS: https:
         try:
             member = await context.bot.get_chat_member(channel, user_id)
             if member.status in ["left", "kicked", "banned"]:
