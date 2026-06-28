@@ -1,4 +1,5 @@
 import os
+import re
 import aiohttp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -9,6 +10,24 @@ from telegram.ext import (
 BOT_TOKEN = "8910395655:AAEZuuWT96CZx3lDLVQe5ey8ShEGHLo6R4o"
 REQUIRED_CHANNELS = ["@chaayy0"]
 RAPIDAPI_KEY = "e56243e197mshbe6077d2ae26f7ap12531fjsnf12ff9fff7d0"
+
+AUDIO_HOST = "youtube-mp3-2025.p.rapidapi.com"
+AUDIO_URL = "https://youtube-mp3-2025.p.rapidapi.com/v1/social/youtube/audio"
+VIDEO_HOST = "youtube-mp36.p.rapidapi.com"
+VIDEO_URL = "https://youtube-mp36.p.rapidapi.com/dl"
+
+
+def extract_video_id(url):
+    patterns = [
+        r"youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})",
+        r"youtu\.be/([a-zA-Z0-9_-]{11})",
+        r"youtube\.com/shorts/([a-zA-Z0-9_-]{11})",
+    ]
+    for p in patterns:
+        m = re.search(p, url)
+        if m:
+            return m.group(1)
+    return None
 
 
 async def check_membership(user_id, context):
@@ -66,20 +85,6 @@ async def check_membership_callback(update: Update, context: ContextTypes.DEFAUL
     await send_welcome(query.message, user.first_name)
 
 
-def extract_video_id(url):
-    import re
-    patterns = [
-        r"youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})",
-        r"youtu\.be/([a-zA-Z0-9_-]{11})",
-        r"youtube\.com/shorts/([a-zA-Z0-9_-]{11})",
-    ]
-    for p in patterns:
-        m = re.search(p, url)
-        if m:
-            return m.group(1)
-    return None
-
-
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     url = update.message.text.strip()
@@ -101,7 +106,6 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ لینک یوتیوب معتبر نیست.")
         return
 
-    context.user_data["url"] = url
     context.user_data["video_id"] = video_id
 
     buttons = [
@@ -127,36 +131,6 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def download_audio(video_id, quality):
-    headers = {
-        "x-rapidapi-key": RAPIDAPI_KEY,
-        "x-rapidapi-host": "youtube-mp36.p.rapidapi.com",
-    }
-    async with aiohttp.ClientSession() as session:
-        async with session.get(
-            f"https://youtube-mp36.p.rapidapi.com/dl?id={video_id}",
-            headers=headers,
-            timeout=aiohttp.ClientTimeout(total=60)
-        ) as resp:
-            data = await resp.json()
-            return data
-
-
-async def download_video(video_id, quality):
-    headers = {
-        "x-rapidapi-key": RAPIDAPI_KEY,
-        "x-rapidapi-host": "youtube-video-download-info.p.rapidapi.com",
-    }
-    async with aiohttp.ClientSession() as session:
-        async with session.get(
-            f"https://youtube-video-download-info.p.rapidapi.com/dl?id={video_id}",
-            headers=headers,
-            timeout=aiohttp.ClientTimeout(total=60)
-        ) as resp:
-            data = await resp.json()
-            return data
-
-
 async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -174,21 +148,38 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.message.edit_text("⏳ در حال پردازش...")
 
+    headers = {
+        "x-rapidapi-key": RAPIDAPI_KEY,
+        "Content-Type": "application/json",
+    }
+
     try:
         if dl_type == "audio":
-            result = await download_audio(video_id, quality)
+            headers["x-rapidapi-host"] = AUDIO_HOST
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    AUDIO_URL,
+                    json={"id": video_id},
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=60)
+                ) as resp:
+                    result = await resp.json()
 
-            if result.get("status") != "ok":
-                await query.message.edit_text(f"❌ خطا: {result.get('msg', 'ناشناخته')}")
-                return
-
-            download_url = result.get("link")
+            # لینک دانلود
+            download_url = result.get("url") or result.get("link") or result.get("download_url")
             title = result.get("title", "audio")
+
+            if not download_url:
+                await query.message.edit_text(f"❌ خطا در دریافت لینک:\n{str(result)[:200]}")
+                return
 
             await query.message.edit_text("⬇️ در حال دانلود...")
 
             async with aiohttp.ClientSession() as session:
-                async with session.get(download_url, timeout=aiohttp.ClientTimeout(total=300)) as resp:
+                async with session.get(
+                    download_url,
+                    timeout=aiohttp.ClientTimeout(total=300)
+                ) as resp:
                     content = await resp.read()
 
             size_mb = len(content) / (1024 * 1024)
@@ -197,32 +188,48 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             await query.message.edit_text(f"📤 در حال آپلود ({size_mb:.1f}MB)...")
-            await query.message.reply_audio(audio=content, title=title, filename=f"{title}.mp3")
+            await query.message.reply_audio(
+                audio=content,
+                title=title,
+                filename=f"{title}.mp3"
+            )
 
         else:
-            result = await download_video(video_id, quality)
+            # دانلود ویدیو با API اول
+            headers["x-rapidapi-host"] = VIDEO_HOST
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{VIDEO_URL}?id={video_id}",
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=60)
+                ) as resp:
+                    result = await resp.json()
 
-            if "url" not in result:
-                await query.message.edit_text("❌ کیفیت مورد نظر پیدا نشد. کیفیت دیگه‌ای امتحان کن.")
+            status = result.get("status")
+            if status != "ok":
+                await query.message.edit_text("❌ خطا در دریافت ویدیو. کیفیت دیگه‌ای امتحان کن.")
                 return
 
-            formats = result.get("url", {})
+            # پیدا کردن لینک با کیفیت مناسب
+            links = result.get("link", [])
+            download_url = None
             title = result.get("title", "video")
 
-            quality_map = {
-                "1080": ["137", "248", "299"],
-                "720": ["136", "247", "298"],
-                "480": ["135", "244"],
-                "360": ["134", "243", "18"],
-                "240": ["133", "242"],
-                "144": ["160", "278"],
-            }
+            quality_int = int(quality)
+            best_url = None
+            best_diff = 99999
 
-            download_url = None
-            for fmt_id in quality_map.get(quality, []):
-                if fmt_id in formats:
-                    download_url = formats[fmt_id][0]["url"]
-                    break
+            for item in links:
+                q = item.get("quality", "")
+                numbers = re.findall(r"\d+", q)
+                if numbers:
+                    q_int = int(numbers[0])
+                    diff = abs(q_int - quality_int)
+                    if diff < best_diff:
+                        best_diff = diff
+                        best_url = item.get("url")
+
+            download_url = best_url
 
             if not download_url:
                 await query.message.edit_text("❌ این کیفیت موجود نیست. کیفیت دیگه‌ای امتحان کن.")
@@ -231,16 +238,25 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.edit_text("⬇️ در حال دانلود...")
 
             async with aiohttp.ClientSession() as session:
-                async with session.get(download_url, timeout=aiohttp.ClientTimeout(total=300)) as resp:
+                async with session.get(
+                    download_url,
+                    timeout=aiohttp.ClientTimeout(total=300)
+                ) as resp:
                     content = await resp.read()
 
             size_mb = len(content) / (1024 * 1024)
             if size_mb > 50:
-                await query.message.edit_text(f"❌ حجم {size_mb:.1f}MB زیاده.\nکیفیت پایین‌تر امتحان کن.")
+                await query.message.edit_text(
+                    f"❌ حجم {size_mb:.1f}MB زیاده.\nکیفیت پایین‌تر امتحان کن."
+                )
                 return
 
             await query.message.edit_text(f"📤 در حال آپلود ({size_mb:.1f}MB)...")
-            await query.message.reply_video(video=content, caption=title, supports_streaming=True)
+            await query.message.reply_video(
+                video=content,
+                caption=title,
+                supports_streaming=True
+            )
 
         await query.message.delete()
 
