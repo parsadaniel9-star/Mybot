@@ -1,5 +1,6 @@
 import os
-import yt_dlp
+import asyncio
+import aiohttp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
@@ -8,13 +9,7 @@ from telegram.ext import (
 
 BOT_TOKEN = "8910395655:AAEZuuWT96CZx3lDLVQe5ey8ShEGHLo6R4o"
 REQUIRED_CHANNELS = ["@chaayy0"]
-
-YDL_BASE = {
-    "quiet": True,
-    "no_warnings": True,
-    "extractor_args": {"youtube": {"player_client": ["android"]}},
-    "http_headers": {"User-Agent": "com.google.android.youtube/17.36.4 (Linux; U; Android 12) gzip"},
-}
+COBALT_API = "https://api.cobalt.tools/api/json"
 
 
 async def check_membership(user_id, context):
@@ -33,7 +28,7 @@ def membership_keyboard(not_joined):
     buttons = []
     for ch in not_joined:
         name = ch.lstrip("@")
-        buttons.append([InlineKeyboardButton(f"عضویت در {ch}", url=f"https://t.me/{name}")])
+        buttons.append([InlineKeyboardButton(f"📢 عضویت در {ch}", url=f"https://t.me/{name}")])
     buttons.append([InlineKeyboardButton("✅ عضو شدم، تایید کن", callback_data="check_membership")])
     return InlineKeyboardMarkup(buttons)
 
@@ -72,6 +67,24 @@ async def check_membership_callback(update: Update, context: ContextTypes.DEFAUL
     await send_welcome(query.message, user.first_name)
 
 
+async def get_cobalt(url, quality="1080", audio_only=False, audio_quality="320"):
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "url": url,
+        "vQuality": quality,
+        "aFormat": "mp3",
+        "isAudioOnly": audio_only,
+        "isAudioMuted": False,
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.post(COBALT_API, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+            data = await resp.json()
+            return data
+
+
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     url = update.message.text.strip()
@@ -88,52 +101,27 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    msg = await update.message.reply_text("🔍 در حال بررسی لینک...")
-
-    try:
-        opts = {**YDL_BASE, "skip_download": True}
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-    except Exception as e:
-        await msg.edit_text(f"❌ خطا:\n{str(e)}")
-        return
-
-    title = info.get("title", "ویدیو")
-    duration = info.get("duration", 0)
-    mins = duration // 60
-    secs = duration % 60
-
-    formats = info.get("formats", [])
-    seen = set()
-    video_qualities = []
-    for f in formats:
-        h = f.get("height")
-        if h and f.get("vcodec") != "none" and h not in seen:
-            seen.add(h)
-            video_qualities.append(h)
-    video_qualities = sorted(video_qualities, reverse=True)
-
     context.user_data["url"] = url
-    context.user_data["title"] = title
 
-    buttons = []
-    row = []
-    for q in video_qualities[:6]:
-        row.append(InlineKeyboardButton(f"🎬 {q}p", callback_data=f"dl_video_{q}"))
-        if len(row) == 3:
-            buttons.append(row)
-            row = []
-    if row:
-        buttons.append(row)
+    buttons = [
+        [
+            InlineKeyboardButton("🎬 1080p", callback_data="dl_video_1080"),
+            InlineKeyboardButton("🎬 720p", callback_data="dl_video_720"),
+            InlineKeyboardButton("🎬 480p", callback_data="dl_video_480"),
+        ],
+        [
+            InlineKeyboardButton("🎬 360p", callback_data="dl_video_360"),
+            InlineKeyboardButton("🎬 240p", callback_data="dl_video_240"),
+            InlineKeyboardButton("🎬 144p", callback_data="dl_video_144"),
+        ],
+        [
+            InlineKeyboardButton("🎵 MP3 320kbps", callback_data="dl_audio_320"),
+            InlineKeyboardButton("🎵 MP3 128kbps", callback_data="dl_audio_128"),
+        ],
+    ]
 
-    buttons.append([
-        InlineKeyboardButton("🎵 MP3 320kbps", callback_data="dl_audio_320"),
-        InlineKeyboardButton("🎵 MP3 128kbps", callback_data="dl_audio_128"),
-    ])
-
-    await msg.delete()
     await update.message.reply_text(
-        f"🎬 {title}\n⏱ {mins}:{secs:02d}\n\n👇 کیفیت رو انتخاب کن:",
+        "👇 کیفیت مورد نظر رو انتخاب کن:",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
@@ -144,7 +132,6 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     data = query.data
     url = context.user_data.get("url")
-    title = context.user_data.get("title", "فایل")
 
     if not url:
         await query.message.edit_text("❌ لینک پیدا نشد. دوباره بفرست.")
@@ -154,41 +141,29 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     dl_type = parts[1]
     quality = parts[2]
 
-    await query.message.edit_text("⏳ در حال دانلود...")
-
-    output_path = f"/tmp/tg_{query.from_user.id}"
-    os.makedirs(output_path, exist_ok=True)
+    await query.message.edit_text("⏳ در حال دریافت لینک دانلود...")
 
     try:
-        if dl_type == "audio":
-            ydl_opts = {
-                **YDL_BASE,
-                "outtmpl": f"{output_path}/%(title)s.%(ext)s",
-                "format": "bestaudio/best",
-                "postprocessors": [{
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "mp3",
-                    "preferredquality": quality,
-                }],
-            }
-        else:
-            ydl_opts = {
-                **YDL_BASE,
-                "outtmpl": f"{output_path}/%(title)s.%(ext)s",
-                "format": f"bestvideo[height<={quality}]+bestaudio/best[height<={quality}]",
-                "merge_output_format": "mp4",
-            }
+        audio_only = dl_type == "audio"
+        result = await get_cobalt(url, quality=quality, audio_only=audio_only, audio_quality=quality)
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+        status = result.get("status")
 
-        files = os.listdir(output_path)
-        if not files:
-            await query.message.edit_text("❌ دانلود ناموفق بود.")
+        if status not in ["stream", "redirect", "tunnel"]:
+            error = result.get("text", "خطای ناشناخته")
+            await query.message.edit_text(f"❌ خطا: {error}")
             return
 
-        file_path = os.path.join(output_path, files[0])
-        size_mb = os.path.getsize(file_path) / (1024 * 1024)
+        download_url = result.get("url")
+        filename = result.get("filename", "video.mp4")
+
+        await query.message.edit_text("⬇️ در حال دانلود و آپلود...")
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(download_url, timeout=aiohttp.ClientTimeout(total=300)) as resp:
+                content = await resp.read()
+
+        size_mb = len(content) / (1024 * 1024)
 
         if size_mb > 50:
             await query.message.edit_text(
@@ -198,27 +173,23 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.message.edit_text(f"📤 در حال آپلود ({size_mb:.1f}MB)...")
 
-        with open(file_path, "rb") as f:
-            if dl_type == "audio":
-                await query.message.reply_audio(audio=f, title=title)
-            else:
-                await query.message.reply_video(video=f, caption=title, supports_streaming=True)
+        if audio_only:
+            await query.message.reply_audio(
+                audio=content,
+                filename=filename,
+                title=filename.replace(".mp3", "")
+            )
+        else:
+            await query.message.reply_video(
+                video=content,
+                filename=filename,
+                supports_streaming=True
+            )
 
         await query.message.delete()
 
     except Exception as e:
         await query.message.edit_text(f"❌ خطا:\n{str(e)}")
-    finally:
-        if os.path.exists(output_path):
-            for f in os.listdir(output_path):
-                try:
-                    os.remove(os.path.join(output_path, f))
-                except:
-                    pass
-            try:
-                os.rmdir(output_path)
-            except:
-                pass
 
 
 def main():
